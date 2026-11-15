@@ -1,0 +1,6 @@
+numpy
+Pillow
+ultralytics>=8.4.0
+transformers>=4.45.0
+psutil
+pytest

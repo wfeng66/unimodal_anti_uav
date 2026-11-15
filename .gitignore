@@ -1,0 +1,24 @@
+# Training outputs and experiment results
+/runs/
+/results/
+
+# Model weights
+/yolo26n.pt
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local environment and editor files
+.env
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
