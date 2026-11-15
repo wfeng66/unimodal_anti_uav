@@ -112,7 +112,7 @@ def _write_summary(path, rows):
         writer.writerows(rows)
 
 
-def _run_trial(args, trial_number, values, output_root, shared_results_csv):
+def _run_trial(args, trial_number, values, output_root):
     learning_rate, weight_decay, batch_size, freeze_epochs = values
     trial_dir = output_root / f"trial_{trial_number:03d}"
     trial_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +134,6 @@ def _run_trial(args, trial_number, values, output_root, shared_results_csv):
         "--num-workers", str(args.num_workers),
         "--device", args.device,
         "--output-dir", str(trial_dir / "checkpoints"),
-        "--results-csv", str(shared_results_csv),
     ]
 
     print(f"\n=== Trial {trial_number}: {values} ===", flush=True)
@@ -189,7 +188,6 @@ def main(argv=None):
         output_root = PROJECT_DIR / output_root
     output_root.mkdir(parents=True, exist_ok=True)
     summary_path = output_root / "tuning_summary.csv"
-    shared_results_csv = output_root / "train_results.csv"
 
     candidates = list(itertools.product(
         args.learning_rates,
@@ -205,7 +203,7 @@ def main(argv=None):
     results = []
     for trial_number, values in enumerate(selected, start=1):
         result = _run_trial(
-            args, trial_number, values, output_root, shared_results_csv
+            args, trial_number, values, output_root
         )
         results.append(result)
         _write_summary(summary_path, results)
