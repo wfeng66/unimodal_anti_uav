@@ -491,7 +491,11 @@ def run_experiment(args, model_factory=create_model):
     coord_std = torch.tensor(std_np, dtype=torch.float32, device=device)
 
     checkpoint = args.checkpoint or DEFAULT_CHECKPOINTS[args.model]
-    results_csv = args.results_csv or _default_results_csv(args.model, args.test)
+    results_csv = (
+        Path(args.results_csv)
+        if args.results_csv
+        else _default_results_csv(args.model, args.test)
+    )
     model = model_factory(args.model, checkpoint).to(device)
     if not hasattr(model, "set_pretrained_trainable"):
         raise TypeError(
