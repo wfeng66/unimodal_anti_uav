@@ -195,6 +195,9 @@ Useful options:
 --max-sync-delta-ms   Maximum image/Leica timestamp difference (default: 100)
 --freeze-pretrained-epochs
                       Freeze pretrained layers initially (default: 5; 0 disables)
+--early-stopping-patience
+                      Stop after this many epochs without validation-loss
+                      improvement (default: 10)
 --train-split         Internal training label (default: train)
 --val-split           Internal validation label (default: val)
 --test-split          Internal test label (default: test)

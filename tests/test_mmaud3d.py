@@ -10,6 +10,7 @@ from torch import nn
 from mmaud3d.metrics import coordinate_statistics, localization_metrics
 from mmaud3d.models import YoloPyramidRegressor
 from train import (
+    _EarlyStopping,
     _default_results_csv,
     _resolve_data_root,
     build_dataset_rows,
@@ -38,6 +39,18 @@ def test_data_path_argument_and_data_root_alias():
     assert parse_args(common + ["--data-root", "/datasets/other"]).data_root == (
         "/datasets/other"
     )
+    assert parse_args(common).early_stopping_patience == 10
+
+
+def test_early_stopping_waits_for_patience_and_resets_on_improvement():
+    stopping = _EarlyStopping(patience=2)
+
+    assert stopping.update(0.5) == (True, False)
+    assert stopping.update(0.4) == (True, False)
+    assert stopping.update(0.41) == (False, False)
+    assert stopping.update(0.39) == (True, False)
+    assert stopping.update(0.391) == (False, False)
+    assert stopping.update(0.392) == (False, True)
 
 
 def _add_sequence(root, name, timestamps, points):

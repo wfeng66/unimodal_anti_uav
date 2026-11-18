@@ -74,6 +74,12 @@ def parse_args(argv=None):
         help="Results CSV; defaults to <model>_<test>_<month>_<year>.csv.",
     )
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help="Stop after this many consecutive epochs without improved validation loss.",
+    )
     parser.add_argument("--freeze-pretrained-epochs", type=int, default=5,
                         help="Freeze pretrained layers for this many initial epochs.")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -91,7 +97,10 @@ def parse_args(argv=None):
                         help="Declared frame of x/y/z labels; must be consistent.")
     parser.add_argument("--coordinate-unit", default="m")
     parser.add_argument("--notes", default="")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.early_stopping_patience < 1:
+        parser.error("--early-stopping-patience must be positive.")
+    return args
 
 
 def _sequence_key(name):
@@ -403,6 +412,21 @@ def _run_epoch(model, loader, optimizer, criterion, device, coord_mean, coord_st
     return total_loss / max(total_items, 1)
 
 
+class _EarlyStopping:
+    def __init__(self, patience):
+        self.patience = patience
+        self.best_loss = float("inf")
+        self.epochs_without_improvement = 0
+
+    def update(self, val_loss):
+        if val_loss < self.best_loss:
+            self.best_loss = val_loss
+            self.epochs_without_improvement = 0
+            return True, False
+        self.epochs_without_improvement += 1
+        return False, self.epochs_without_improvement >= self.patience
+
+
 @torch.no_grad()
 def _predict(model, loader, device, coord_mean, coord_std):
     model.eval()
@@ -538,9 +562,11 @@ def run_experiment(args, model_factory=create_model):
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     start_training = time.perf_counter()
-    best_val_loss = float("inf")
+    early_stopping = _EarlyStopping(args.early_stopping_patience)
     best_epoch = 0
+    epochs_completed = 0
     for epoch in range(1, args.epochs + 1):
+        epochs_completed = epoch
         if epoch == args.freeze_pretrained_epochs + 1:
             model.set_pretrained_trainable(True)
             print("Unfroze pretrained layers; training the full model.")
@@ -554,8 +580,8 @@ def run_experiment(args, model_factory=create_model):
             f"Epoch {epoch:03d}/{args.epochs}: "
             f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}"
         )
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        improved, should_stop = early_stopping.update(val_loss)
+        if improved:
             best_epoch = epoch
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -565,6 +591,13 @@ def run_experiment(args, model_factory=create_model):
                 "coordinate_std": std_np.tolist(),
                 "config": config,
             }, checkpoint_path)
+        if should_stop:
+            print(
+                f"Early stopping after {epoch} epochs: validation loss did not "
+                f"improve for {args.early_stopping_patience} consecutive epochs. "
+                f"Best epoch: {best_epoch} (val_loss={early_stopping.best_loss:.6f})."
+            )
+            break
 
     training_time = time.perf_counter() - start_training
 
@@ -592,7 +625,7 @@ def run_experiment(args, model_factory=create_model):
         "model_variant": checkpoint,
         "checkpoint_version": checkpoint,
         **_hardware_info(device),
-        "epochs": args.epochs,
+        "epochs": epochs_completed,
         "best_epoch": best_epoch,
         "pretrained_layers_frozen_epochs": args.freeze_pretrained_epochs,
         "learning_rate": args.learning_rate,

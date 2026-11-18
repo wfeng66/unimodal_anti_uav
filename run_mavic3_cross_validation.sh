@@ -19,7 +19,7 @@ for validation_sequence in "${VALIDATION_SEQUENCES[@]}"; do
         --val "$validation_sequence" \
         --test Mavic3 \
         --results-csv "$RESULTS_CSV" \
-        --epochs 10
+        --epochs 10 \
         "$@"
 done
 
