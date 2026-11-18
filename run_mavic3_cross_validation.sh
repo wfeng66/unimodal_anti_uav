@@ -14,13 +14,19 @@ mkdir -p "$RESULTS_DIR"
 
 for validation_sequence in "${VALIDATION_SEQUENCES[@]}"; do
     echo "Cross-validation fold: validation=${validation_sequence}, test=Mavic3"
-    "$PYTHON" train.py \
+    CUDA_VISIBLE_DEVICES=1 "$PYTHON" train.py \
         --model "$MODEL" \
+        --data-root /home/lab/feng_home/data/MMAUD \
         --val "$validation_sequence" \
         --test Mavic3 \
         --results-csv "$RESULTS_CSV" \
-        --epochs 10 \
+        --freeze-pretrained-epochs 5 \
+        --learning-rate 5e-8 \
+        --weight-decay 0.1 \
+        --batch-size 16 \
+        --epochs 100 \
         "$@"
 done
+
 
 echo "All folds complete. Results: ${RESULTS_CSV}"
