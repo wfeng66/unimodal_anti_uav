@@ -1,14 +1,18 @@
 import csv
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 from mmaud3d.metrics import coordinate_statistics, localization_metrics
-from mmaud3d.models import YoloPyramidRegressor
+from mmaud3d.models import DinoDroneRegressor, YoloPyramidRegressor, create_model
+from tune_hyperparameters import parse_args as parse_tuning_args
 from train import (
     _EarlyStopping,
     _default_results_csv,
@@ -40,6 +44,15 @@ def test_data_path_argument_and_data_root_alias():
         "/datasets/other"
     )
     assert parse_args(common).early_stopping_patience == 10
+    assert parse_args(
+        ["--model", "dino-drone", "--val", "avata", "--test", "m300"]
+    ).model == "dino-drone"
+    assert parse_tuning_args(
+        [
+            "--model", "dino-drone", "--data-root", "/data",
+            "--val", "avata", "--test", "m300",
+        ]
+    ).model == "dino-drone"
 
 
 def test_early_stopping_waits_for_patience_and_resets_on_improvement():
@@ -137,3 +150,96 @@ def test_yolo_pyramid_regressor_freeze_then_unfreeze():
     model.train()
     assert model.pretrained.training
     assert all(parameter.requires_grad for parameter in model.pretrained.parameters())
+
+
+class _FakeDinoBackbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            hidden_size=8,
+            patch_size=14,
+            num_hidden_layers=12,
+        )
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.requested_hidden_states = False
+
+    def forward(self, pixel_values, output_hidden_states=False):
+        self.requested_hidden_states = output_hidden_states
+        batch, _, height, width = pixel_values.shape
+        sequence_length = (height // 14) * (width // 14) + 1
+        hidden_states = tuple(
+            torch.full(
+                (batch, sequence_length, 8),
+                float(index),
+                device=pixel_values.device,
+            ) * self.scale
+            for index in range(13)
+        )
+        return SimpleNamespace(hidden_states=hidden_states)
+
+
+def test_dino_drone_uses_pretrained_multiscale_features_and_returns_coordinates():
+    pretrained = _FakeDinoBackbone()
+    model = DinoDroneRegressor(pretrained, hidden_size=8, patch_size=14)
+
+    prediction = model(torch.rand(2, 3, 56, 56))
+
+    assert prediction.shape == (2, 3)
+    assert pretrained.requested_hidden_states
+    assert all(parameter.requires_grad for parameter in model.feature_pyramid.parameters())
+
+    model.set_pretrained_trainable(False)
+    model.train()
+    assert not pretrained.training
+    assert all(not parameter.requires_grad for parameter in pretrained.parameters())
+    assert all(parameter.requires_grad for parameter in model.regression_head.parameters())
+
+
+def test_dino_drone_uses_reported_intermediate_transformer_blocks():
+    model = DinoDroneRegressor(_FakeDinoBackbone(), hidden_size=8, patch_size=14)
+
+    class CaptureFeaturePyramid(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_values = None
+
+        def forward(self, features):
+            self.input_values = [feature[:, :, 0, 0].mean().item() for feature in features]
+            batch, _, height, width = features[0].shape
+            pyramid_feature = torch.zeros(
+                batch, 256, height, width, device=features[0].device
+            )
+            return pyramid_feature, pyramid_feature, pyramid_feature
+
+    capture = CaptureFeaturePyramid()
+    model.feature_pyramid = capture
+    model(torch.rand(2, 3, 56, 56))
+
+    assert capture.input_values == [3.0, 6.0, 9.0, 12.0]
+
+
+def test_dino_drone_requires_patch_aligned_image_size():
+    model = DinoDroneRegressor(_FakeDinoBackbone(), hidden_size=8, patch_size=14)
+
+    with pytest.raises(ValueError, match="divisible"):
+        model(torch.rand(2, 3, 55, 56))
+
+
+def test_dino_drone_factory_loads_pretrained_checkpoint(monkeypatch):
+    pretrained = _FakeDinoBackbone()
+    loaded_checkpoints = []
+    transformers = ModuleType("transformers")
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(checkpoint):
+            loaded_checkpoints.append(checkpoint)
+            return pretrained
+
+    transformers.AutoModel = FakeAutoModel
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    model = create_model("dino-drone", "facebook/dinov2-small")
+
+    assert loaded_checkpoints == ["facebook/dinov2-small"]
+    assert model.pretrained is pretrained

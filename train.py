@@ -46,7 +46,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="MMAUD V1 RGB-to-3D-prism regression training"
     )
-    parser.add_argument("--model", required=True, choices=("yolo", "detr", "dinov2"))
+    parser.add_argument(
+        "--model", required=True, choices=("yolo", "detr", "dinov2", "dino-drone")
+    )
     default_data_root = (
         r"I:\Data\Anti-UAV\MMAUD\v1"
         if os.name == "nt"

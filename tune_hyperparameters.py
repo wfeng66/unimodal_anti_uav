@@ -74,7 +74,9 @@ def parse_args(argv=None):
             "Do not use the reported test metrics to choose hyperparameters."
         )
     )
-    parser.add_argument("--model", choices=("yolo", "detr", "dinov2"), default="yolo")
+    parser.add_argument(
+        "--model", choices=("yolo", "detr", "dinov2", "dino-drone"), default="yolo"
+    )
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--val", required=True, help="Validation recording(s).")
     parser.add_argument(

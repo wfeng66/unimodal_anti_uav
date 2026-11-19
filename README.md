@@ -1,9 +1,10 @@
 # MMAUD RGB-to-3D Prism Localization Baselines
 
 A small, modular PyTorch baseline for predicting the 3D Leica-tracked prism position
-from an MMAUD camera image. It supports `--model yolo`, `--model detr`, and
-`--model dinov2`. It is intentionally a first-stage single-frame RGB regression
-benchmark; it does not implement tracking, temporal fusion, or multimodal fusion.
+from an MMAUD camera image. It supports `--model yolo`, `--model detr`,
+`--model dinov2`, and `--model dino-drone`. It is intentionally a first-stage
+single-frame RGB regression benchmark; it does not implement tracking, temporal
+fusion, or multimodal fusion.
 
 ## 1. Important MMAUD data facts
 
@@ -102,6 +103,7 @@ Do not compare a body-center prediction with prism-center labels.
 | `yolo` | Ultralytics YOLO26 detection backbone + feature pyramid with a new 3-value regression head | `yolo26n.pt` |
 | `detr` | Hugging Face DETR encoder-decoder; first learned decoder query feeds a 3D regression MLP | `facebook/detr-resnet-50` |
 | `dinov2` | Hugging Face DINOv2 ViT; CLS token feeds a 3D regression MLP | `facebook/dinov2-base` |
+| `dino-drone` | Pretrained DINOv2 ViT-S/14 features from blocks 2, 5, 8, and 11; DINOFPN-style P3/P4/P5 pyramid feeds a 3D regression MLP | `facebook/dinov2-small` |
 
 The YOLO adapter loads the pretrained detection model, retains its pretrained
 backbone and feature-pyramid layers, removes the detection head, and attaches a
@@ -109,8 +111,12 @@ new randomly initialized 3D regression head. The pretrained layers are frozen
 for the first `--freeze-pretrained-epochs` epochs (default 5), then all layers
 are unfrozen for the remaining epochs. Set this option to `0` to fine-tune the
 entire model from the first epoch. The same freeze/unfreeze schedule applies to
-the pretrained DETR and DINOv2 encoders. The task is one 3D prism coordinate
-per image, not 2D boxes.
+the pretrained DETR and DINOv2 encoders, including `dino-drone`. `dino-drone`
+loads its DINOv2 backbone with `AutoModel.from_pretrained`, fuses the four intermediate spatial feature
+maps, and globally pools P3/P4/P5 before its new 3D regression head. The
+detector's box/class head is replaced because this MMAUD task predicts one 3D
+prism coordinate per image, not 2D boxes. Use `--checkpoint` to select another
+compatible pretrained DINOv2 checkpoint.
 
 All models output three normalized continuous values. The target mean and
 standard deviation are calculated from the training split only. Predictions
@@ -168,8 +174,9 @@ Run the four validation folds with Mavic3 held out for testing:
 bash run_mavic3_cross_validation.sh
 ```
 
-By default this uses YOLO. Set `MODEL=detr` or `MODEL=dinov2` to run a different
-method; extra training options can be passed after the script name. Avata,
+By default this uses YOLO. Set `MODEL=detr`, `MODEL=dinov2`, or
+`MODEL=dino-drone` to run a different method; extra training options can be
+passed after the script name. Avata,
 M300, Mavic2, and Pham4 rotate as validation sequences, with all other
 non-test recordings used for training. The four runs append to the same
 `<method>_mavic3_<month>_<year>.csv` file.
@@ -182,6 +189,7 @@ Change the model:
 ```bash
 python train.py --model detr --data-root /path/to/MMAUD --val avata --test m300
 python train.py --model dinov2 --data-root /path/to/MMAUD --val avata --test m300
+python train.py --model dino-drone --data-root /path/to/MMAUD --val avata --test m300
 ```
 
 Useful options:
