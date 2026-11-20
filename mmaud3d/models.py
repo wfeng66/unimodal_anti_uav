@@ -9,6 +9,42 @@ DEFAULT_CHECKPOINTS = {
     "dinov2": "facebook/dinov2-base",
     "dino-drone": "facebook/dinov2-small",
 }
+TWO_CAMERA_MODES = ("cat", "ind", "left", "right", "mean", "cmb")
+
+
+def _make_regression_head(feature_size, two_cam):
+    if two_cam not in TWO_CAMERA_MODES:
+        raise ValueError(f"Unsupported two-camera mode: {two_cam!r}.")
+    input_size = feature_size * (2 if two_cam == "cat" else 1)
+    return nn.Sequential(
+        nn.Linear(input_size, 512),
+        nn.GELU(),
+        nn.Dropout(0.1),
+        nn.Linear(512, 3),
+    )
+
+
+def _forward_regression(model, images):
+    two_cam = model.two_cam
+    if two_cam in ("cat", "mean"):
+        if images.ndim != 5 or images.shape[1] != 2:
+            raise ValueError(
+                f"--2cam {two_cam} expects a batch shaped "
+                "(batch, 2, channels, height, width)."
+            )
+        batch_size = images.shape[0]
+        view_features = model.extract_features(images.flatten(0, 1))
+        view_features = view_features.reshape(batch_size, 2, -1)
+        if two_cam == "cat":
+            return model.regression_head(view_features.flatten(1))
+        return model.regression_head(view_features).mean(dim=1)
+
+    if images.ndim != 4:
+        raise ValueError(
+            f"--2cam {two_cam} expects a batch shaped "
+            "(batch, channels, height, width)."
+        )
+    return model.regression_head(model.extract_features(images))
 
 
 class _FeaturePassthrough(nn.Module):
@@ -24,9 +60,10 @@ class _FeaturePassthrough(nn.Module):
 
 
 class YoloPyramidRegressor(nn.Module):
-    def __init__(self, pretrained_model):
+    def __init__(self, pretrained_model, two_cam="ind"):
         super().__init__()
         self.pretrained = pretrained_model
+        self.two_cam = two_cam
         self._pretrained_trainable = True
         model_layers = getattr(self.pretrained, "model", None)
         if model_layers is None or len(model_layers) < 2:
@@ -54,12 +91,7 @@ class YoloPyramidRegressor(nn.Module):
                 raise TypeError("YOLO pyramid outputs must be 4D feature tensors.")
             channels.append(feature.shape[1])
 
-        self.regression_head = nn.Sequential(
-            nn.Linear(sum(channels), 512),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 3),
-        )
+        self.regression_head = _make_regression_head(sum(channels), two_cam)
 
     def set_pretrained_trainable(self, trainable):
         self._pretrained_trainable = trainable
@@ -78,23 +110,22 @@ class YoloPyramidRegressor(nn.Module):
             self.pretrained.eval()
         return self
 
-    def forward(self, images):
+    def extract_features(self, images):
         features = self.pretrained(images)
         pooled = [F.adaptive_avg_pool2d(feature, 1).flatten(1) for feature in features]
-        return self.regression_head(torch.cat(pooled, dim=1))
+        return torch.cat(pooled, dim=1)
+
+    def forward(self, images):
+        return _forward_regression(self, images)
 
 
 class TransformerRegressor(nn.Module):
-    def __init__(self, pretrained_model, hidden_size):
+    def __init__(self, pretrained_model, hidden_size, two_cam="ind"):
         super().__init__()
         self.pretrained = pretrained_model
+        self.two_cam = two_cam
         self._pretrained_trainable = True
-        self.regression_head = nn.Sequential(
-            nn.Linear(hidden_size, 512),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 3),
-        )
+        self.regression_head = _make_regression_head(hidden_size, two_cam)
         self.register_buffer(
             "image_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         )
@@ -119,7 +150,7 @@ class TransformerRegressor(nn.Module):
             self.pretrained.eval()
         return self
 
-    def forward(self, images):
+    def extract_features(self, images):
         images = (images - self.image_mean) / self.image_std
         outputs = self.pretrained(pixel_values=images)
         hidden = getattr(outputs, "last_hidden_state", None)
@@ -127,7 +158,10 @@ class TransformerRegressor(nn.Module):
             hidden = getattr(outputs, "decoder_last_hidden_state", None)
         if hidden is None:
             raise RuntimeError("Pretrained transformer returned no hidden states.")
-        return self.regression_head(hidden[:, 0])
+        return hidden[:, 0]
+
+    def forward(self, images):
+        return _forward_regression(self, images)
 
 
 class _ConvBNAct(nn.Sequential):
@@ -187,8 +221,8 @@ class DinoDroneRegressor(TransformerRegressor):
     # These are zero-based DINOv2 transformer-block indices used by DINO-Drone.
     FEATURE_BLOCK_INDICES = (2, 5, 8, 11)
 
-    def __init__(self, pretrained_model, hidden_size, patch_size):
-        super().__init__(pretrained_model, hidden_size)
+    def __init__(self, pretrained_model, hidden_size, patch_size, two_cam="ind"):
+        super().__init__(pretrained_model, hidden_size, two_cam)
         if isinstance(patch_size, int):
             self.patch_size = (patch_size, patch_size)
         elif isinstance(patch_size, (tuple, list)) and len(patch_size) == 2:
@@ -200,11 +234,8 @@ class DinoDroneRegressor(TransformerRegressor):
 
         self.hidden_size = hidden_size
         self.feature_pyramid = DinoDroneFeaturePyramid(hidden_size)
-        self.regression_head = nn.Sequential(
-            nn.Linear(3 * self.feature_pyramid.feature_size, 512),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 3),
+        self.regression_head = _make_regression_head(
+            3 * self.feature_pyramid.feature_size, two_cam
         )
 
     def _feature_map(self, hidden, grid_height, grid_width):
@@ -218,7 +249,7 @@ class DinoDroneRegressor(TransformerRegressor):
             hidden.shape[0], grid_height, grid_width, self.hidden_size
         ).permute(0, 3, 1, 2).contiguous()
 
-    def forward(self, images):
+    def extract_features(self, images):
         patch_height, patch_width = self.patch_size
         height, width = images.shape[-2:]
         if height % patch_height or width % patch_width:
@@ -250,10 +281,12 @@ class DinoDroneRegressor(TransformerRegressor):
         ]
         pyramid = self.feature_pyramid(feature_maps)
         pooled = [F.adaptive_avg_pool2d(feature, 1).flatten(1) for feature in pyramid]
-        return self.regression_head(torch.cat(pooled, dim=1))
+        return torch.cat(pooled, dim=1)
 
 
-def create_model(model_name, checkpoint):
+def create_model(model_name, checkpoint, two_cam="cat"):
+    if two_cam not in TWO_CAMERA_MODES:
+        raise ValueError(f"Unsupported two-camera mode: {two_cam!r}.")
     if model_name == "yolo":
         try:
             from ultralytics import YOLO
@@ -261,7 +294,7 @@ def create_model(model_name, checkpoint):
             raise ImportError(
                 "YOLO training requires ultralytics; install requirements.txt."
             ) from exc
-        return YoloPyramidRegressor(YOLO(checkpoint).model)
+        return YoloPyramidRegressor(YOLO(checkpoint).model, two_cam)
 
     if model_name in ("detr", "dinov2", "dino-drone"):
         try:
@@ -282,7 +315,7 @@ def create_model(model_name, checkpoint):
                 raise ValueError(
                     f"Cannot determine DINOv2 patch size for checkpoint {checkpoint!r}."
                 )
-            return DinoDroneRegressor(pretrained, hidden_size, patch_size)
-        return TransformerRegressor(pretrained, hidden_size)
+            return DinoDroneRegressor(pretrained, hidden_size, patch_size, two_cam)
+        return TransformerRegressor(pretrained, hidden_size, two_cam)
 
     raise ValueError(f"Unsupported model name: {model_name!r}")

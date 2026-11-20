@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import socket
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ CSV_FIELDS = [
     "checkpoint_version", "training_machine", "gpu_model", "cpu_model", "ram_gb",
     "epochs", "best_epoch", "learning_rate", "batch_size", "optimizer",
     "weight_decay", "loss_function", "image_size", "random_seed",
-    "pretrained_layers_frozen_epochs",
+    "pretrained_layers_frozen_epochs", "two_camera_mode",
     "dataset_name", "dataset_version", "modality", "train_split", "val_split",
     "test_split", "coordinate_frame", "coordinate_unit",
     "total_parameters", "trainable_parameters", "training_time_seconds",
@@ -48,6 +49,16 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--model", required=True, choices=("yolo", "detr", "dinov2", "dino-drone")
+    )
+    parser.add_argument(
+        "--2cam",
+        dest="two_cam",
+        choices=("cat", "ind", "left", "right", "mean", "cmb"),
+        default="cat",
+        help=(
+            "How to use the horizontally combined camera views: concatenate "
+            "features, train independently, select a camera, or average coordinates."
+        ),
     )
     default_data_root = (
         r"I:\Data\Anti-UAV\MMAUD\v1"
@@ -73,7 +84,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--results-csv",
         default=None,
-        help="Results CSV; defaults to <model>_<test>_<month>_<year>.csv.",
+        help="Results CSV; defaults to <model>_<test>_<2cam>_<month>_<year>.csv.",
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument(
@@ -121,11 +132,13 @@ def _parse_sequence_names(value, option):
     return set(names)
 
 
-def _default_results_csv(model_name, test_sequences, timestamp=None):
+def _default_results_csv(model_name, test_sequences, two_camera_mode, timestamp=None):
     timestamp = timestamp or datetime.now(timezone.utc)
     test_slug = "_".join(sorted(_parse_sequence_names(test_sequences, "--test")))
     month_year = timestamp.strftime("%m_%Y")
-    return Path("results") / f"{model_name.lower()}_{test_slug}_{month_year}.csv"
+    return Path("results") / (
+        f"{model_name.lower()}_{test_slug}_{two_camera_mode}_{month_year}.csv"
+    )
 
 
 def _read_leica_relative_points(sequence_dir):
@@ -479,10 +492,38 @@ def _hardware_info(device):
 def _append_csv(path, row):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    exists = path.exists()
+    if path.exists():
+        with path.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            existing_fields = reader.fieldnames
+            if not existing_fields:
+                raise ValueError(f"Existing results CSV has no header: {path}")
+            existing_rows = list(reader)
+        if existing_fields != CSV_FIELDS:
+            fieldnames = CSV_FIELDS + [
+                field for field in existing_fields if field not in CSV_FIELDS
+            ]
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    newline="",
+                    encoding="utf-8",
+                    dir=path.parent,
+                    delete=False,
+                ) as file:
+                    temporary_path = Path(file.name)
+                    writer = csv.DictWriter(file, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(existing_rows)
+                os.replace(temporary_path, path)
+            finally:
+                if temporary_path is not None and temporary_path.exists():
+                    temporary_path.unlink()
+
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
-        if not exists:
+        if f.tell() == 0:
             writer.writeheader()
         writer.writerow({k: row.get(k, "") for k in CSV_FIELDS})
 
@@ -506,8 +547,12 @@ def run_experiment(args, model_factory=create_model):
         args.test_split,
     )
 
-    train_ds = PrismImageDataset(rows, args.train_split, args.image_size)
-    val_ds = PrismImageDataset(rows, args.val_split, args.image_size)
+    train_ds = PrismImageDataset(
+        rows, args.train_split, args.image_size, args.two_cam
+    )
+    val_ds = PrismImageDataset(
+        rows, args.val_split, args.image_size, args.two_cam
+    )
     train_loader = _make_loader(train_ds, args.batch_size, True, args.num_workers, device)
     val_loader = _make_loader(val_ds, args.batch_size, False, args.num_workers, device)
 
@@ -520,9 +565,9 @@ def run_experiment(args, model_factory=create_model):
     results_csv = (
         Path(args.results_csv)
         if args.results_csv
-        else _default_results_csv(args.model, args.test)
+        else _default_results_csv(args.model, args.test, args.two_cam)
     )
-    model = model_factory(args.model, checkpoint).to(device)
+    model = model_factory(args.model, checkpoint, args.two_cam).to(device)
     if not hasattr(model, "set_pretrained_trainable"):
         raise TypeError(
             "Model factory must return a model with set_pretrained_trainable(bool)."
@@ -557,6 +602,10 @@ def run_experiment(args, model_factory=create_model):
         "test_sequences": args.test,
         "max_sync_delta_ms": args.max_sync_delta_ms,
         "sequence_split_sample_counts": counts,
+        "sequence_split_model_sample_counts": {
+            args.train_split: len(train_ds),
+            args.val_split: len(val_ds),
+        },
         "results_csv": str(results_csv),
     })
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -608,7 +657,9 @@ def run_experiment(args, model_factory=create_model):
     model.load_state_dict(saved["model_state_dict"])
 
     # The test Dataset/loader is created only after training and checkpoint selection.
-    test_ds = PrismImageDataset(rows, args.test_split, args.image_size)
+    test_ds = PrismImageDataset(
+        rows, args.test_split, args.image_size, args.two_cam
+    )
     test_loader = _make_loader(test_ds, args.batch_size, False, args.num_workers, device)
     pred, target = _predict(model, test_loader, device, coord_mean, coord_std)
     metrics = localization_metrics(pred, target)
@@ -630,6 +681,7 @@ def run_experiment(args, model_factory=create_model):
         "epochs": epochs_completed,
         "best_epoch": best_epoch,
         "pretrained_layers_frozen_epochs": args.freeze_pretrained_epochs,
+        "two_camera_mode": args.two_cam,
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
         "optimizer": "AdamW",

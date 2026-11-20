@@ -9,6 +9,7 @@ import random
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -19,6 +20,7 @@ VAL_LOSS_PATTERN = re.compile(
 )
 SUMMARY_FIELDS = (
     "trial",
+    "two_camera_mode",
     "learning_rate",
     "weight_decay",
     "batch_size",
@@ -77,6 +79,12 @@ def parse_args(argv=None):
     parser.add_argument(
         "--model", choices=("yolo", "detr", "dinov2", "dino-drone"), default="yolo"
     )
+    parser.add_argument(
+        "--2cam",
+        dest="two_cam",
+        choices=("cat", "ind", "left", "right", "mean", "cmb"),
+        default="cat",
+    )
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--val", required=True, help="Validation recording(s).")
     parser.add_argument(
@@ -114,6 +122,17 @@ def _write_summary(path, rows):
         writer.writerows(rows)
 
 
+def _summary_filename(model_name, test_sequences, two_camera_mode, timestamp=None):
+    timestamp = timestamp or datetime.now(timezone.utc)
+    test_slug = "_".join(sorted(
+        "".join(char.lower() for char in name if char.isalnum())
+        for name in test_sequences.split(",")
+        if name.strip()
+    ))
+    month_year = timestamp.strftime("%m_%Y")
+    return f"{model_name.lower()}_{test_slug}_{two_camera_mode}_{month_year}.csv"
+
+
 def _run_trial(args, trial_number, values, output_root):
     learning_rate, weight_decay, batch_size, freeze_epochs = values
     trial_dir = output_root / f"trial_{trial_number:03d}"
@@ -123,6 +142,7 @@ def _run_trial(args, trial_number, values, output_root):
         sys.executable,
         str(TRAIN_SCRIPT),
         "--model", args.model,
+        "--2cam", args.two_cam,
         "--data-root", args.data_root,
         "--val", args.val,
         "--test", args.test,
@@ -170,6 +190,7 @@ def _run_trial(args, trial_number, values, output_root):
     best_epoch, best_val_loss = min(losses, key=lambda item: item[1])
     return {
         "trial": trial_number,
+        "two_camera_mode": args.two_cam,
         "learning_rate": learning_rate,
         "weight_decay": weight_decay,
         "batch_size": batch_size,
@@ -189,7 +210,9 @@ def main(argv=None):
     if not output_root.is_absolute():
         output_root = PROJECT_DIR / output_root
     output_root.mkdir(parents=True, exist_ok=True)
-    summary_path = output_root / "tuning_summary.csv"
+    summary_path = output_root / _summary_filename(
+        args.model, args.test, args.two_cam
+    )
 
     candidates = list(itertools.product(
         args.learning_rates,

@@ -1,7 +1,8 @@
 # MMAUD RGB-to-3D Prism Localization Baselines
 
 A small, modular PyTorch baseline for predicting the 3D Leica-tracked prism position
-from an MMAUD camera image. It supports `--model yolo`, `--model detr`,
+from an MMAUD synchronized, horizontally combined two-camera image. It supports
+`--model yolo`, `--model detr`,
 `--model dinov2`, and `--model dino-drone`. It is intentionally a first-stage
 single-frame RGB regression benchmark; it does not implement tracking, temporal
 fusion, or multimodal fusion.
@@ -118,6 +119,19 @@ detector's box/class head is replaced because this MMAUD task predicts one 3D
 prism coordinate per image, not 2D boxes. Use `--checkpoint` to select another
 compatible pretrained DINOv2 checkpoint.
 
+The `--2cam` option controls how every model uses the two camera views. The
+image is split at its horizontal midpoint; each view is resized without
+changing its aspect ratio and padded to the square `--image-size` canvas.
+Fisheye undistortion is not applied.
+
+| `--2cam` | Behavior |
+|---|---|
+| `cat` (default) | Run both views through the shared model and concatenate their learned features before one 3D regression head. |
+| `ind` | Treat left and right views as independent samples with the same coordinate target; validation/test metrics are per view. |
+| `left` / `right` | Use only the selected camera view. |
+| `mean` | Predict each view separately with shared weights and average the two XYZ outputs; loss and evaluation use the averaged coordinate. |
+| `cmb` | Treat the original combined frame as one image and resize it directly to the square input, matching the old behavior (including aspect-ratio distortion). |
+
 All models output three normalized continuous values. The target mean and
 standard deviation are calculated from the training split only. Predictions
 are converted back to the declared coordinate units before evaluation.
@@ -165,8 +179,8 @@ python train.py \
 ```
 
 The default results file is named
-`results/<method>_<test-split>_<month>_<year>.csv`, for example
-`results/yolo_m300_11_2026.csv`. Pass `--results-csv` to override that path.
+`results/<model>_<test-split>_<2cam>_<month>_<year>.csv`, for example
+`results/yolo_m300_cat_11_2026.csv`. Pass `--results-csv` to override that path.
 
 Run the four validation folds with Mavic3 held out for testing:
 
@@ -179,7 +193,7 @@ By default this uses YOLO. Set `MODEL=detr`, `MODEL=dinov2`, or
 passed after the script name. Avata,
 M300, Mavic2, and Pham4 rotate as validation sequences, with all other
 non-test recordings used for training. The four runs append to the same
-`<method>_mavic3_<month>_<year>.csv` file.
+`<model>_mavic3_<2cam>_<month>_<year>.csv` file.
 
 `--data_path` can point to another extracted dataset root. `--data-root` is
 also accepted as an equivalent spelling.
@@ -190,12 +204,14 @@ Change the model:
 python train.py --model detr --data-root /path/to/MMAUD --val avata --test m300
 python train.py --model dinov2 --data-root /path/to/MMAUD --val avata --test m300
 python train.py --model dino-drone --data-root /path/to/MMAUD --val avata --test m300
+python train.py --model dino-drone --2cam mean --data-root /path/to/MMAUD --val avata --test m300
 ```
 
 Useful options:
 
 ```text
 --checkpoint          Override the model's default pretrained checkpoint
+--2cam                cat, ind, left, right, mean, or cmb (default: cat)
 --data_path           Dataset root (default depends on Windows vs. WSL/Linux)
 --data-root           Alias for --data_path
 --val                 Comma-separated validation recording names
@@ -224,12 +240,16 @@ Each run writes:
 
 - Best validation checkpoint (`*_best.pt`)
 - Full run configuration JSON (`*_config.json`)
-- One appended row in the method/test/month/year results CSV (default)
+- One appended row in the model/test/camera-mode/month/year results CSV (default)
 
 The CSV includes model/checkpoint, machine/GPU/CPU/RAM, training hyperparameters,
-dataset version and split names, coordinate frame/unit, total/trainable parameter
-counts, training time, batch-1 inference latency/FPS, peak CUDA allocated/reserved
-memory, sample counts, and final held-out test metrics.
+two-camera mode, dataset version and split names, coordinate frame/unit,
+total/trainable parameter counts, training time, batch-1 inference latency/FPS,
+peak CUDA allocated/reserved memory, sample counts, and final held-out test
+metrics.
+
+When appending to a results CSV created before `two_camera_mode` was added, the
+header is migrated and existing rows are preserved with that new field blank.
 
 Metrics (meters):
 
